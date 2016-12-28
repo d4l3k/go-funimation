@@ -3,45 +3,54 @@ package funimation
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"path"
+	"strings"
 
-	"golang.org/x/net/publicsuffix"
+	"github.com/pkg/errors"
+
+	funimation "golang.ssttevee.com/funimation/lib"
 )
 
 // Client is a client to the Funimation API.
 type Client struct {
-	client http.Client
+	Client http.Client
 	User   User
 }
 
 // NewClient returns a new Client.
 func NewClient() *Client {
-	jar, err := cookiejar.New(&cookiejar.Options{
-		PublicSuffixList: publicsuffix.List,
-	})
+	jar, err := cookiejar.New(nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	c := &Client{
-		client: http.Client{
+		Client: http.Client{
 			Jar: jar,
 		},
 	}
 	return c
 }
 
+// Cookies returns all cookies for the client.
+func (c Client) Cookies() []*http.Cookie {
+	return c.Client.Jar.Cookies(c.baseURL())
+}
+
+// SetCookies sets the cookies on the client.
+func (c Client) SetCookies(cookies []*http.Cookie) {
+	c.Client.Jar.SetCookies(c.baseURL(), cookies)
+}
+
 var _ json.Marshaler = &Client{}
 
 // MarshalJSON implements json.Marshaler.
 func (c Client) MarshalJSON() ([]byte, error) {
-	return json.Marshal(c.client.Jar.Cookies(c.baseURL()))
+	return json.Marshal(c.Cookies())
 }
 
 var _ json.Unmarshaler = &Client{}
@@ -52,7 +61,7 @@ func (c Client) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &cookies); err != nil {
 		return err
 	}
-	c.client.Jar.SetCookies(c.baseURL(), cookies)
+	c.Client.Jar.SetCookies(c.baseURL(), cookies)
 	return nil
 }
 
@@ -65,7 +74,7 @@ func (c Client) baseURL() *url.URL {
 }
 
 func loginURL() string {
-	return path.Join(BaseURL, LoginPath)
+	return BaseURL + LoginPath
 }
 
 type loginRequest struct {
@@ -101,7 +110,7 @@ func (c *Client) Login(username, password string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
-	resp, err := c.client.Post(loginURL(), "application/json", bytes.NewBuffer(body))
+	resp, err := c.Client.Post(loginURL(), "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		return User{}, err
 	}
@@ -114,9 +123,23 @@ func (c *Client) Login(username, password string) (User, error) {
 		return User{}, errors.New(user.Message)
 	}
 	c.User = user
+
+	form := url.Values{}
+	form.Add("logged", "1")
+	form.Add("email_field", username)
+	form.Add("password_field", password)
+	form.Add("currenturl", "http://shop.funimation.com/")
+	form.Add("loginpopup", "yes")
+
+	resp2, err := c.Client.Post("http://www.funimation.com/login", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		return User{}, err
+	}
+	defer resp2.Body.Close()
 	return user, nil
 }
 
+// QueueResponse is all the shows queued.
 type QueueResponse struct {
 	ExecutionTime string `json:"execution_time"`
 	UserID        string `json:"user_id"`
@@ -217,20 +240,25 @@ type QueueResponse struct {
 	Items  string `json:"items"`
 }
 
-func queueURL(limit, offset int) string {
-	return fmt.Sprintf("%sprofile/queue_search_ajax?offset=%d&limit=%d", BaseURL, offset, limit)
+func queueURL(userID string, limit, offset int) string {
+	return fmt.Sprintf("%sprofile/queue_search_ajax?userid=%s&offset=%d&limit=%d", BaseURL, userID, offset, limit)
 }
 
 // Queue returns all shows that have been queued up.
 func (c *Client) Queue(limit, offset int) (QueueResponse, error) {
 	var qr QueueResponse
-	resp, err := c.client.Get(queueURL(limit, offset))
+	resp, err := c.Client.Get(queueURL(c.User.UserID, limit, offset))
 	if err != nil {
 		return qr, err
 	}
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(&qr); err != nil {
-		return qr, err
+		return qr, errors.Wrap(err, "decode queue response, probably login error")
 	}
 	return qr, nil
+}
+
+// DownloadClient returns a client that can be used to download an episode.
+func (c *Client) DownloadClient() *funimation.Client {
+	return funimation.New(c.Client.Jar.(*cookiejar.Jar))
 }

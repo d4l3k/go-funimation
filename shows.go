@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/pkg/errors"
 )
 
 // Show represents a single Funimation show.
@@ -115,6 +117,27 @@ func Shows(limit, offset int) ([]Show, error) {
 		return nil, err
 	}
 	return shows, nil
+}
+
+func showURL(id string) string {
+	return fmt.Sprintf("%s%s?id=%s", BaseURL, ShowsPath, id)
+}
+
+// GetShow returns a single show.
+func GetShow(id string) (Show, error) {
+	var shows []Show
+	resp, err := http.Get(showURL(id))
+	if err != nil {
+		return Show{}, err
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&shows); err != nil {
+		return Show{}, err
+	}
+	if len(shows) == 0 {
+		return Show{}, errors.Errorf("no show with id=%s", id)
+	}
+	return shows[0], nil
 }
 
 func videosURL(limit, offset int) string {
